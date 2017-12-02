@@ -1,0 +1,842 @@
+/******************************************************************************
+ Copyright (C) 2010  R&D Institute of HuaCai Co.,Ltd.
+ File Name      : CTask_Execute.c
+ Description    : 曲线数据模块任务执行
+ ------------------------------------------------------------------------------
+ Modification History:
+ <No.>  <version>       <time>      <author>        <contents>
+   1、    1.00        2012-08-15    azh     the original version
+******************************************************************************/
+#include    "..\inc\global_config.h"
+
+//////////////////////////////// 函数实现 //////////////////////////////////////
+extern const U16 curve_task_di[CON_TASK_CURVE_DI_NUM];
+//曲线处理模块初始化
+unsigned char CTask_Proc_Init()
+{
+	unsigned char ucRet=RET_SUCCESS;
+	ucRet=Task_Manage_Init();									//任务初始化
+    memset(&stGRTaskExeInfo, 0, sizeof(STGRTASKEXEINFO));
+	stGRTaskExeInfo.ucTaskValidFlag=CON_TASK_RETDATA_INVALID;	//任务状态信息初始化
+	return ucRet;
+}
+
+//调度任务列表中的任务，在找到合适的需要处理的任务时对其进行处理
+//程序流程
+//检查任务控制数据区
+//有新活动任务，则配置任务
+//有活动任务，且执行时间到，则启动任务执行
+//为方便任务返回数据的处理，一次只执行一个任务，知道该任务数据完成
+unsigned char CTask_Proc_Down_Timer()
+{
+	unsigned char ucRet=RET_ERROR;
+
+	Task_Proc();//azh 保存数据在抄完数据后
+
+	return ucRet;
+}
+
+//定时检查任务回应数据中的数据，当需要上行时，则将相应的数据检出，并上传给主站
+//azh 这是内网的任务主动上送 国网的不在这
+//unsigned char CTask_Proc_Up_Timer()
+//{
+//	unsigned char ucRet=RET_SUCCESS,i;
+//	for(i=0;i<CON_GRTASK_NUM;i++)
+//	{
+//		if(Task_RequireUp(i)==RET_GRTASK_NEEDPROC)
+//			Task_UpSendRecord(i);
+//	}
+//	return ucRet;
+//}
+
+//从任务队列中得到任务，进行转换填写RS485发送队列 
+unsigned char Task_Proc()
+{
+	unsigned char	ucRet=RET_SUCCESS,i=0;
+
+//测量点曲线任务
+    if(stGRTaskExeInfo.ucTaskValidFlag == CON_TASK_RETDATA_INVALID)
+    {    
+
+    	for(i=0;i<CON_GRTASK_NUM;i++)
+    	{
+    		stGRTaskExeInfo.ucNowExeTaskNo++;
+    		if(stGRTaskExeInfo.ucNowExeTaskNo>=CON_GRTASK_NUM)
+    			stGRTaskExeInfo.ucNowExeTaskNo=0;
+    		
+    		if( Task_RequireProc(stGRTaskExeInfo.ucNowExeTaskNo)==RET_GRTASK_NEEDPROC )
+    		{
+    			stGRTaskExeInfo.ucTaskValidFlag=CON_TASK_RETDATA_VALID;			//任务执行标志
+    			gucOneLoopFlag = 1;
+    			memset(&stGRDefineArea.stGRTaskRetVal,0,sizeof(STGRTASKRETVAL));
+    			
+    			if( stGRDefineArea.stGRTask[stGRTaskExeInfo.ucNowExeTaskNo].ucTaskType==CON_GRTASK_TYPE_RELAY )
+    			{//	
+    				;//Task_Proc_Relay(stGRTaskExeInfo.ucNowExeTaskNo);			//中继任务处理
+    				stGRTaskExeInfo.ucTaskValidFlag=CON_TASK_RETDATA_INVALID;//azh
+    			}
+    			else if( stGRDefineArea.stGRTask[stGRTaskExeInfo.ucNowExeTaskNo].ucTaskType==CON_GRTASK_TYPE_NORMAL )
+    			{
+    				Task_Proc_Normal(stGRTaskExeInfo.ucNowExeTaskNo);			//普通任务处理
+    			}
+    			else
+    			{
+    			    stGRTaskExeInfo.ucTaskValidFlag=CON_TASK_RETDATA_INVALID;
+    			}
+    			break;
+    		}
+    	}
+    }
+	return ucRet;
+}
+
+//处理中继任务
+//unsigned char Task_Proc_Relay(unsigned char ucTaskNo)
+//{
+//	return RET_SUCCESS;
+//}
+
+//处理普通任务
+unsigned char Task_Proc_Normal(unsigned char ucTaskNo)
+{
+	unsigned char	ucRet=RET_SUCCESS,ucMPNo=0,i=0;
+	unsigned short	usDI;
+	STDIINFO		stDIInfoTmp;
+	unsigned char	ucMPType = CON_MPTYPE_NULL;
+	
+	ucMPNo=stGRDefineArea.stGRTask[ucTaskNo].ucMPNo;//测量点
+
+	stGRDefineArea.stGRTaskRetVal.ucTaskNo		=ucTaskNo;
+	stGRDefineArea.stGRTaskRetVal.stRetDateTime	=GetCurrentTime();
+	stGRDefineArea.stGRTaskRetVal.ucDINum		=stGRDefineArea.stGRTask[ucTaskNo].ucDataItemNum;
+	for(i=0;i<stGRDefineArea.stGRTaskRetVal.ucDINum;i++)
+	{
+//		usDI=stGRDefineArea.stGRTask[ucTaskNo].ucDataArea[i*2]+stGRDefineArea.stGRTask[ucTaskNo].ucDataArea[i*2+1]*0x100;
+        usDI = curve_task_di[i];
+		stDIInfoTmp=Main_DI_Data_Query_Manage(usDI);
+		stGRDefineArea.stGRTaskRetVal.stDIVal[i].usDI		=usDI;
+		stGRDefineArea.stGRTaskRetVal.stDIVal[i].ucDILen	=stDIInfoTmp.ucContentLen;
+//		stGRDefineArea.stGRTaskRetVal.stDIVal[i].ucDIVAL[0]	=CON_GRTASK_DATA_INVALID;
+	}
+    memset(stGRDefineArea.stGRTaskRetVal.ucTaskData, CON_GRTASK_DATA_INVALID, CON_GRTASK_TaskDateMaxDateLen);//512
+	
+	ucMPType=RunPara_GetMPType(ucMPNo);
+//	if(ucMPNo==CON_MPNO_SUMG_FIXED)								//测量点终端自身的任务处理
+//		GetData_From_Ter_SumG();
+//	else
+//	{
+		if( ucMPType == CON_MPTYPE_METER )
+		{
+			for(i=0;i<stGRDefineArea.stGRTaskRetVal.ucDINum;i++)
+			{
+				ucRet = Fill_TaskData_Manage(stGRDefineArea.stGRTaskRetVal.stDIVal[i].usDI,CONRS485SOUR_GRTASK_UNREAD,ucMPNo);
+//azh 由于上面这个函数是直接从定时刷新数据里获得数据 所以下面的曲线任务取数据  就不用自主去抄表
+//				if(ucRet!=RET_SUCCESS)
+//				{
+//					stDIInfoTmp=Main_DI_Data_Query_Manage(stGRDefineArea.stGRTaskRetVal.stDIVal[i].usDI);
+//					if( stDIInfoTmp.ucHave==CON_DI_HAVE && stDIInfoTmp.ucType==CON_DI_TYPE_DATA && 
+//						stDIInfoTmp.ucMPType==CON_DI_MPTYPE_NORMAL && stDIInfoTmp.ucReadMeterEnabel==CON_DI_OPERATE_ENABLE &&
+//						stDIInfoTmp.usBigDI != CON_DI_TYPE_INVALID)
+//					{
+//						Fill_MeterTask(stDIInfoTmp.usBigDI,CONRS485SOUR_GRTASK,ucMPNo,ucRS485TaskGroupListNo);
+//					}
+//				}
+			}
+			Fill_TaskData();//azh 因为是从全局数组里读取保存的 所以在这里直接处理掉 如果是自己抄表的 则在抄完最后一项数据时保存
+            stGRTaskExeInfo.ucTaskValidFlag = CON_TASK_RETDATA_INVALID;
+//		}
+//		else if(ucMPType==CON_MPTYPE_PULSE || ucMPType==CON_MPTYPE_TER)	//终端或者脉冲直接读取
+//		{
+//			for(i=0;i<stGRDefineArea.stGRTaskRetVal.ucDINum;i++)
+//				ucRet = Fill_TaskData_Manage(stGRDefineArea.stGRTaskRetVal.stDIVal[i].usDI,CONRS485SOUR_GRTASK_UNREAD,ucMPNo);
+//		}
+	}
+	else
+	{
+	    stGRTaskExeInfo.ucTaskValidFlag=CON_TASK_RETDATA_INVALID;    
+	}
+	
+	return ucRet;
+}
+
+//把回应数据填写到任务的存储区(Flash中)
+unsigned char Fill_TaskData()
+{
+    unsigned char *mem_ptr=NULL,mem_type;
+	unsigned char	ucRet=RET_SUCCESS;
+	unsigned char	ucTaskNo=0;
+	unsigned char 	*pucGRTaskRetBuf;
+	unsigned short	usGRTaskRetBufLen=0;
+	unsigned long 	ulTemp;
+	STDATETIME 		stTempTime;
+	unsigned short 	usNumtask_Per_Block ;
+	unsigned short 	usExedNum;
+	unsigned long	ulTime_Tmp;
+	ucTaskNo=stGRDefineArea.stGRTaskRetVal.ucTaskNo;
+	
+	if( ucTaskNo<CON_GRTASK_NUM && 
+		stGRDefineArea.stGRTask[ucTaskNo].ucTaskType!=CON_GRTASK_TYPE_INVALID && 
+		stGRDefineArea.stGRTask[ucTaskNo].ucActive==CON_GRTASK_ACTIVE )
+	{
+        mem_ptr = alloc_comm_mem(MEM_1536_TYPE, &mem_type, GET_MEM_ERR0);
+        if(mem_ptr == NULL)
+        {
+            return RET_ERROR;
+        }	
+		pucGRTaskRetBuf=(unsigned char *)mem_ptr;			//工作数据区
+		memset(pucGRTaskRetBuf,0xEE,512);
+		
+		usGRTaskRetBufLen=Make_TaskRet_String(&(stGRDefineArea.stGRTaskRetVal),pucGRTaskRetBuf);
+		
+		//保存任务返回数据
+		Task_SaveRetVal(ucTaskNo,pucGRTaskRetBuf,usGRTaskRetBufLen);
+		//任务运行信息更新
+		stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum++;
+		Save_Curve_Task_Para(ucTaskNo, CON_TASKIF_EXEDNUM_OFST, CON_TASK_PARA_SINGLE_SAVE);
+		
+		usNumtask_Per_Block = MCP_FLASH_BLOCK_SIZE / stGRDefineArea.stGRTask[ucTaskNo].usPerTaskRetMem ;//一块能放几点
+		usExedNum = stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum % (usNumtask_Per_Block * SECTORNUM_PERTASK);
+		
+		if(usExedNum % usNumtask_Per_Block == 0)
+		{//一个BLOCK已经写满，把下一块擦除 azh 这里其实只有一个sector
+//			Flash_Eraseblock_MCP((MCP_FLASH_TASK_START_BLOCK + ucTaskNo * SECTORNUM_PERTASK + (usExedNum / usNumtask_Per_Block)) * MCP_FLASH_BLOCK_SIZE);
+            MCP_Flash_Sector_Erase((MCP_FLASH_TASK_START_BLOCK + ucTaskNo * SECTORNUM_PERTASK + (usExedNum / usNumtask_Per_Block)) * MCP_FLASH_BLOCK_SIZE);
+			//HdConvertWatchDog();
+			if((stGRDefineArea.stGRTaskInfo[ucTaskNo].usTailPos / usNumtask_Per_Block) == (usExedNum / usNumtask_Per_Block))
+			{	//尾指针在要擦除的块里，需要往后移
+				stGRDefineArea.stGRTaskInfo[ucTaskNo].usTailPos = ((usExedNum / usNumtask_Per_Block + 1) % SECTORNUM_PERTASK) * usNumtask_Per_Block;
+				//数据块首点对应时间更新
+				stTempTime=TimeConverToDataTime(stGRDefineArea.stGRTaskInfo[ucTaskNo].ulTailTime);
+				ulTime_Tmp = (unsigned long)stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeInter;
+				ulTime_Tmp = ulTime_Tmp * usNumtask_Per_Block;
+				AddTime( &stTempTime,ulTime_Tmp,stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeUnit );
+				stGRDefineArea.stGRTaskInfo[ucTaskNo].ulTailTime=TimeConver(&stTempTime,CON_TIMEUNIT_SEC);
+				Save_Curve_Task_Para(ucTaskNo, CON_TASKIF_BLK_OFST, CON_TASK_PARA_BLOCK_SAVE);
+//azh 171011从显示终端上合并过来
+                //azh 160311--- 一block擦除后，这个数据开始有效也修正到有效数据首点时刻
+    			AddTime(&stGRDefineArea.stGRTask[ucTaskNo].stStartActive,
+    				ulTime_Tmp,	stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeUnit);
+    			Save_Curve_Task_Para(ucTaskNo, CON_TASK_STARTACTIVE_OFST, CON_TASK_PARA_SINGLE_SAVE);
+                //azh 160311
+        		if(stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum>=stGRDefineArea.stGRTask[ucTaskNo].usSavePointNum)			//执行次数很大后需要更新一下
+        		{
+        			stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum = 0;//写满一圈后，回复
+        			Save_Curve_Task_Para(ucTaskNo, CON_TASKIF_EXEDNUM_OFST, CON_TASK_PARA_SINGLE_SAVE);
+        		}
+        		//azh 160311---
+			}
+		}
+//azh 160311---		
+//		if(stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum>0xFFF0)			//执行次数很大后需要更新一下
+//		{
+//			ulTemp=(unsigned long)stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum;
+//			stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum %= stGRDefineArea.stGRTask[ucTaskNo].usSavePointNum;
+//			Save_Curve_Task_Para(ucTaskNo, CON_TASKIF_EXEDNUM_OFST, CON_TASK_PARA_SINGLE_SAVE);
+//			ulTemp=ulTemp-stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum;
+//			AddTime(&stGRDefineArea.stGRTask[ucTaskNo].stStartActive,
+//				(ulTemp*stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeInter),
+//				stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeUnit);
+//			Save_Curve_Task_Para(ucTaskNo, CON_TASK_STARTACTIVE_OFST, CON_TASK_PARA_SINGLE_SAVE);
+//		}
+		
+	    free_mem_block(mem_ptr);//
+	}
+	return ucRet;
+}
+
+unsigned short	Make_TaskRet_String(STGRTASKRETVAL *pstGRTaskRetVal,unsigned char *pucGRTaskRetBuf)
+{
+	unsigned short	m=0,i=0;
+	for(i=0;i<pstGRTaskRetVal->ucDINum;i++)//azh 没有保存时间啦?
+	{
+		if(i >= CON_GRTASK_DINUM)
+			break;
+		if(m>=512)
+		{
+			m=CON_GRTASK_TaskDateMaxDateLen;//0xffff;
+			break;
+		}
+//		memcpy(pucGRTaskRetBuf+m,pstGRTaskRetVal->stDIVal[i].ucDIVAL,pstGRTaskRetVal->stDIVal[i].ucDILen);
+		m+=pstGRTaskRetVal->stDIVal[i].ucDILen;
+	}
+	memcpy(pucGRTaskRetBuf,pstGRTaskRetVal->ucTaskData, m);//azh 保存的时候已经放一个缓冲了 
+
+	return m;
+}
+
+//任务回应数据查询后上送，填写TerMsg
+//unsigned char Fill_TaskData_to_TerMsg(STTERMSG *pstTerMsg,unsigned char ucTaskNo,unsigned short usPos,unsigned char ucSendTaskType)
+//{
+//	unsigned char ucRet=RET_SUCCESS;
+///*
+//	unsigned int nDataAddr=0;
+//	unsigned char i=0,j=0,k=0;
+//	unsigned char ucDataLen=0;
+//	
+//	STDATAITEM stDataItemTmp;
+//	
+//	stTerMsgList.ucTerMsgNum=0;
+//	
+//	if( pstTerMsg!=NULL && usPos<stGRDefineArea.stGRTaskList.stGRTask[ucTaskNo].usSavePointNum )
+//	{
+//		//数据起始地址
+//		nDataAddr=stGRDefineArea.stGRTaskList.stGRTaskInfo[ucTaskNo].nDataAddr+
+//			usPos*stGRDefineArea.stGRTaskList.stGRTaskInfo[ucTaskNo].usPerTaskRetMem;		
+//		//数据时间
+//		memcpy( &(pstTerMsg->stOtherInfo.stStartTime),stGRDefineArea.stGRTaskRetVal.ucRetVal+nDataAddr,sizeof(STDATETIME) );		
+//		pstTerMsg->stOtherInfo.ucDataNum=1;//点数
+//		nDataAddr+=6;	
+//		//数据内容
+//		if( stGRDefineArea.stGRTaskList.stGRTask[ucTaskNo].ucTaskType==CON_GRTASK_TYPE_RELAY )//中继
+//		{
+//			ClearDataItem(&stDataItemTmp);
+//			//标识
+//			stDataItemTmp.usItemLabel	=stGRDefineArea.stGRTaskRetVal.ucRetVal[nDataAddr++];
+//			stDataItemTmp.usItemLabel	+=stGRDefineArea.stGRTaskRetVal.ucRetVal[nDataAddr++]*0x100;
+//			//长度
+//			stDataItemTmp.ucDataLen		=stGRDefineArea.stGRTaskRetVal.ucRetVal[nDataAddr++];
+//			//内容
+//			for(i=0;i<(stDataItemTmp.ucDataLen);i++)
+//			{
+//				if(i<=CON_DI_DATA_LEN)
+//					stDataItemTmp.ucDataContent[i]=stGRDefineArea.stGRTaskRetVal.ucRetVal[nDataAddr++];
+//			}
+//			pstTerMsg->stDataItem[k++]=stDataItemTmp;
+//		}
+//		else if( stGRDefineArea.stGRTaskList.stGRTask[ucTaskNo].ucTaskType==CON_GRTASK_TYPE_NORMAL )//普通任务
+//		{			
+//			for(i=0;i<stGRDefineArea.stGRTaskList.stGRTask[ucTaskNo].ucDataItemNum;i++)
+//			{
+//				ClearDataItem( &stDataItemTmp );
+//				//标识
+//				stDataItemTmp.usItemLabel	=stGRDefineArea.stGRTaskRetVal.ucRetVal[nDataAddr++];
+//				stDataItemTmp.usItemLabel	+=stGRDefineArea.stGRTaskRetVal.ucRetVal[nDataAddr++]*0x100;
+//				//长度
+//				stDataItemTmp.ucDataLen		=stGRDefineArea.stGRTaskRetVal.ucRetVal[nDataAddr++];
+//				//内容
+//				for(j=0;j<stDataItemTmp.ucDataLen;j++)
+//					stDataItemTmp.ucDataContent[j]=stGRDefineArea.stGRTaskRetVal.ucRetVal[nDataAddr++];
+//				if( (ucDataLen+stDataItemTmp.ucDataLen)>96 || k>=16 )
+//				{
+//					pstTerMsg->ucDataItemNum=k;
+//					AddTerMsgList(pstTerMsg,ucSendTaskType);
+//					
+//					//初始化:只对数据项和数据项数量进行初始化
+//					ucDataLen=0;k=0;
+//					pstTerMsg->ucDataItemNum=0;
+//					for( j=0;j<CON_TERMSG_DI_NUM;j++ )
+//						ClearDataItem( &(pstTerMsg->stDataItem[j]) );
+//					pstTerMsg->stDataItem[k++]=stDataItemTmp;
+//					ucDataLen+=stDataItemTmp.ucDataLen;
+//				}
+//				else
+//				{
+//					pstTerMsg->stDataItem[k++]=stDataItemTmp;
+//					ucDataLen+=stDataItemTmp.ucDataLen;
+//				}
+//			}//for 
+//		}
+//		if( k>0 )
+//		{
+//			pstTerMsg->ucDataItemNum=k;
+//			AddTerMsgList(pstTerMsg,ucSendTaskType);
+//		}
+//		if( stTerMsgList.ucTerMsgNum>0 )    
+//		{
+//			switch( ucSendTaskType )
+//			{
+//			case 00:
+//				AddTerMsgList_to_SendTaskList();
+//				break;
+//			case 01:
+//				AddTerMsgList_to_RS485UPSendList();
+//				break;
+//			default:break;
+//			}
+//		}
+//	}*/
+//	return ucRet;
+//}
+
+//查询任务是否需要处理
+//	停电后需要存储对应时间点的数据无效值
+unsigned char Task_RequireProc(unsigned char ucTaskNo)
+{
+	unsigned char ucRet=RET_SUCCESS,mem_type;
+	unsigned long lCurrTime=0,lNextExeTime=0;
+	unsigned char *pucGRTaskRetBuf,*mem_ptr;
+	unsigned short usGRTaskRetBufLen=0;
+	unsigned long ulTemp;
+	
+	STDATETIME stNextExeTime,stTempTime;
+//azh 160311---
+	unsigned short 	usNumtask_Per_Block ;
+	unsigned short 	usExedNum;
+	unsigned long	ulTime_Tmp;
+//azh 160311---
+	STDATETIME stCurrentTime=GetCurrentTime();
+	
+	if( stGRDefineArea.stGRTask[ucTaskNo].ucTaskType!=CON_GRTASK_TYPE_INVALID && 
+		stGRDefineArea.stGRTask[ucTaskNo].ucActive==CON_GRTASK_ACTIVE )
+	{//查询任务是否有效,是否激活
+		lCurrTime=TimeConver(&stCurrentTime,CON_TIMEUNIT_SEC);
+		lNextExeTime=TimeConver(&(stGRDefineArea.stGRTaskRunInfo[ucTaskNo].stNextExeTime),CON_TIMEUNIT_SEC);
+		if(lCurrTime>=lNextExeTime)		//判断基准时间
+		{//10分钟以内不执行任务，则在下一个执行时间执行
+			stNextExeTime=stGRDefineArea.stGRTaskRunInfo[ucTaskNo].stNextExeTime;
+			if( stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeUnit>CON_TIMEUNIT_MIN )
+			{
+				AddTime(&stNextExeTime,10,CON_TIMEUNIT_MIN);
+			}
+			else if( stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeUnit==CON_TIMEUNIT_MIN )
+			{
+				if( stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeInter>=10 )
+					AddTime(&stNextExeTime,10,CON_TIMEUNIT_MIN);
+				else
+					AddTime( &stNextExeTime,(unsigned long)stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeInter,
+					stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeUnit );
+			}
+			if( lCurrTime>(TimeConver(&stNextExeTime,CON_TIMEUNIT_SEC)) )
+			{//计算下次执行时间
+				AddTime( &(stGRDefineArea.stGRTaskRunInfo[ucTaskNo].stNextExeTime),
+					(unsigned long)stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeInter,
+					stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeUnit );
+				Save_Curve_Task_Para(ucTaskNo, CON_TASKRIF_NEXTEXTIME_OFST, CON_TASK_PARA_SINGLE_SAVE);
+
+				//可以填入无效数据
+                mem_ptr = alloc_comm_mem(MEM_1536_TYPE, &mem_type, GET_MEM_ERR0);
+                if(mem_ptr == NULL)
+                {
+                    return RET_ERROR;
+                }	
+				pucGRTaskRetBuf=(unsigned char *)mem_ptr;			//工作数据区
+				usGRTaskRetBufLen=stGRDefineArea.stGRTask[ucTaskNo].usPerTaskRetMem;
+				memset(pucGRTaskRetBuf,CON_GRTASK_DATA_INVALID,usGRTaskRetBufLen);
+				Task_SaveRetVal(ucTaskNo,pucGRTaskRetBuf,usGRTaskRetBufLen);
+				free_mem_block(mem_ptr);//
+					
+				stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum++;
+				Save_Curve_Task_Para(ucTaskNo, CON_TASKIF_EXEDNUM_OFST, CON_TASK_PARA_SINGLE_SAVE);
+				if((stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum % stGRDefineArea.stGRTask[ucTaskNo].usSavePointNum)==stGRDefineArea.stGRTaskInfo[ucTaskNo].usTailPos)
+				{//数据块首点位置更新
+					stGRDefineArea.stGRTaskInfo[ucTaskNo].usTailPos++;
+					if(stGRDefineArea.stGRTaskInfo[ucTaskNo].usTailPos==stGRDefineArea.stGRTask[ucTaskNo].usSavePointNum)
+						stGRDefineArea.stGRTaskInfo[ucTaskNo].usTailPos=0;
+					//数据块首点对应时间更新
+					stTempTime=TimeConverToDataTime(stGRDefineArea.stGRTaskInfo[ucTaskNo].ulTailTime);
+					AddTime( &stTempTime,
+						(unsigned long)stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeInter,
+						stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeUnit );
+					stGRDefineArea.stGRTaskInfo[ucTaskNo].ulTailTime=TimeConver(&stTempTime,CON_TIMEUNIT_SEC);
+					Save_Curve_Task_Para(ucTaskNo, CON_TASKIF_BLK_OFST, CON_TASK_PARA_BLOCK_SAVE);
+				}
+				if(stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum>0xFFF0)			//执行次数很大后需要更新一下
+				{
+					ulTemp=(unsigned long)stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum;
+					stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum %= stGRDefineArea.stGRTask[ucTaskNo].usSavePointNum;
+					Save_Curve_Task_Para(ucTaskNo, CON_TASKIF_EXEDNUM_OFST, CON_TASK_PARA_SINGLE_SAVE);
+					ulTemp=ulTemp-stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum;
+					AddTime(&stGRDefineArea.stGRTask[ucTaskNo].stStartActive,
+						(ulTemp*stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeInter),
+						stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeUnit);
+					Save_Curve_Task_Para(ucTaskNo, CON_TASK_STARTACTIVE_OFST, CON_TASK_PARA_SINGLE_SAVE);
+				}
+				//注意还没有抄到一个数据有停电了，这种情况认为停电是从上次以来是连续的
+			}else
+			{
+				stGRDefineArea.stGRTaskRetVal.stRetDateTime=GetCurrentTime();
+				//计算下次执行时间
+				AddTime( &(stGRDefineArea.stGRTaskRunInfo[ucTaskNo].stNextExeTime),
+					(unsigned long)stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeInter,
+					stGRDefineArea.stGRTask[ucTaskNo].stTITaskInter.ucTimeUnit );
+				Save_Curve_Task_Para(ucTaskNo, CON_TASKRIF_NEXTEXTIME_OFST, CON_TASK_PARA_SINGLE_SAVE);
+				ucRet=RET_GRTASK_NEEDPROC;
+			}
+		}
+	}
+	return ucRet;
+}
+
+//任务分解,查询大项命令
+//	查询不到时，不发送，对应数据长度内容为0
+//unsigned char Task_Resolve(STSENDDILIST *pstSendDIList,unsigned char ucTaskNo)
+//{
+//	unsigned char ucRet=RET_SUCCESS;
+//	unsigned char ucLabelPos=0,i=0,j=0;
+//	unsigned short usDI=0;
+//	
+//	STDIINFO stDIInfoTmp;
+//	
+//	memset(pstSendDIList,0,sizeof(STSENDDILIST));
+//	
+//	for(i=0;i<stGRDefineArea.stGRTask[ucTaskNo].ucDataItemNum;i++)
+//	{
+////		usDI=stGRDefineArea.stGRTask[ucTaskNo].ucDataArea[i*2]+stGRDefineArea.stGRTask[ucTaskNo].ucDataArea[i*2+1]*0x100;
+//        usDI = curve_task_di[i];    
+//		memset(&stDIInfoTmp,0,sizeof(STDIINFO));
+//		stDIInfoTmp=Main_DI_Data_Query_Manage( usDI );			//查询
+//		
+//		if( stDIInfoTmp.ucHave==CON_DI_HAVE && 
+//			stDIInfoTmp.ucType==CON_DI_TYPE_DATA && stDIInfoTmp.ucMPType==CON_DI_MPTYPE_NORMAL )
+//		{
+//			if( stDIInfoTmp.ucReadMeterEnabel==CON_DI_OPERATE_ENABLE )
+//			{
+//				for( j=0;j<ucLabelPos;j++ )
+//				{
+//					if( pstSendDIList->usDILabel[j]==stDIInfoTmp.usBigDI )
+//						break;		//在输出列表找到当前待加入的数据项的大项命令，则拒绝该数据项；找不到，则加入大项目命令
+//				}
+//				if( j>=ucLabelPos )
+//					pstSendDIList->usDILabel[ucLabelPos++]=stDIInfoTmp.usBigDI;
+//			}
+//		}
+//	}
+//	pstSendDIList->ucDINum=ucLabelPos;
+//	
+//	return ucRet;
+//}
+
+//执行任务分解后，填抄表发送队列
+//unsigned char Fill_MeterTask(unsigned short usDI,unsigned char ucTaskSour,unsigned char ucMPNo,unsigned char ucRS485TaskGroupListNo)
+//{
+//	unsigned char ucRet=RET_SUCCESS;
+//// 	unsigned char ucPortNo;
+////	SetRS485TaskPer(&stRS485TaskTmp,ucTaskSour,CON_SEQNO_NULL,CON_RS485_REPORT_TYPE_GET,usDI,ucMPNo,NULL);
+////	ucPortNo=RunPara_GetMeterPara_PortNo_byMPNo(ucMPNo);
+////azh	RS485_FillCommand(&stRS485TaskTmp,ucRS485TaskGroupListNo,ucPortNo);
+//	return ucRet;
+//}
+//
+////终端自己运算的总加数据
+//unsigned char GetData_From_Ter_SumG()
+//{
+//	unsigned char ucRet=RET_SUCCESS;
+//	unsigned char i=0;
+//	for(i=0;i<stGRDefineArea.stGRTaskRetVal.ucDINum;i++)
+//		ucRet = Fill_TaskData_Manage(stGRDefineArea.stGRTaskRetVal.stDIVal[i].usDI,CONRS485SOUR_GRTASK_UNREAD,CON_MPNO_SUMG_FIXED);
+//
+//	return ucRet;
+//}
+
+/***************************************************************************************/
+//azh 南网的上送
+//查询任务返回的数据是否需要上送
+//unsigned char Task_RequireUp(unsigned char ucTaskNo)
+//{
+//	unsigned char	ucRet=RET_GRTASK_NONEEDPROC;
+//	unsigned long	lCurrTime=0,lNextUpTime=0;
+//	
+//	STDATETIME stCurrentTime;
+//	
+//	if( stGRDefineArea.stGRTask[ucTaskNo].ucTaskType!=CON_GRTASK_TYPE_INVALID && 
+//		stGRDefineArea.stGRTask[ucTaskNo].ucActive==CON_GRTASK_ACTIVE )
+//	{
+//		if( stGRDefineArea.stGRTask[ucTaskNo].stTIReSendInter.ucTimeInter!=0 &&
+//			stGRDefineArea.stGRTask[ucTaskNo].stTIReSendInter.ucTimeUnit!=0 )
+//		{
+//			//需要主动上送
+//			stCurrentTime=GetCurrentTime();
+//			lCurrTime=TimeConver(&stCurrentTime,CON_TIMEUNIT_SEC);
+//			lNextUpTime=TimeConver(&(stGRDefineArea.stGRTaskRunInfo[ucTaskNo].stNextUpTime),CON_TIMEUNIT_SEC);
+//			
+//			if( lCurrTime>=lNextUpTime )//比较上送时间
+//			{
+//				ucRet=RET_GRTASK_NEEDPROC;
+//				AddTime( &(stGRDefineArea.stGRTaskRunInfo[ucTaskNo].stNextUpTime),
+//					(unsigned long)stGRDefineArea.stGRTask[ucTaskNo].stTIReSendInter.ucTimeInter,
+//					stGRDefineArea.stGRTask[ucTaskNo].stTIReSendInter.ucTimeUnit );
+//			}
+//		}
+//	}
+//	return ucRet;
+//}
+
+//azh 南网的任务上送
+//查找数据上送
+//unsigned char Task_UpSendRecord(unsigned char ucTaskNo)
+//{
+//	unsigned char	ucRet=RET_SUCCESS;
+////    unsigned char *mem_ptr=NULL,mem_type;
+////	unsigned short	usPointNum;
+////	unsigned short	usLen=0;
+////	unsigned char	*pucGRTaskUpBuf;
+////	STDATETIME stTimeTemp;
+////	
+////	if(ucTaskNo>=CON_GRTASK_NUM)
+////		return RET_ERROR;
+////	
+////	//计算主动上送的点数
+////	usPointNum=Task_GetUpSendPointNum(ucTaskNo);
+////	if(usPointNum==0)
+////		return ucRet;
+////
+////    mem_ptr = alloc_comm_mem(MEM_1536_TYPE, &mem_type, GET_MEM_ERR0);
+////    if(mem_ptr == NULL)
+////    {
+////        return RET_ERROR;
+////    }	
+////	pucGRTaskUpBuf=(unsigned char *)mem_ptr;			//工作数据区
+////	
+////	//获取最新的数据到临时缓冲区
+////	Task_QueryRetVal_Newest(ucTaskNo,pucGRTaskUpBuf,usPointNum,stGRDefineArea.stGRTask[ucTaskNo].ucResendDataInter,&stTimeTemp,&usLen);
+////	if(usPointNum!=(unsigned short)(pucGRTaskUpBuf[0]+0x100*pucGRTaskUpBuf[1]))
+////	{    
+////		free_mem_block(mem_ptr);//
+////		return RET_ERROR;
+////	}
+////	
+////	//数据项长度由本任务处理模块整理分发
+////	
+////	//整理临时缓冲区，填发上送
+////	Fill_TaskData_to_TerMsg(&stTerMsgTmp,1,0,1);
+////	
+////	//不是永远执行的任务，要判断任务是否执行完
+////	if(stGRDefineArea.stGRTask[ucTaskNo].usExeNum!=0)
+////	{
+////		//上送完毕才能清除任务，注意可能执行次数已经超过设定的usExeNum
+////		if(stGRDefineArea.stGRTaskInfo[ucTaskNo].usExedNum>=stGRDefineArea.stGRTask[ucTaskNo].usExeNum)
+////			Task_Clear(ucTaskNo);
+////	}
+////
+////    free_mem_block(mem_ptr);//
+//	return ucRet;
+//}
+
+//void TimeChange_CTaskProc(STDATETIME stOldTime,STDATETIME stNewTime)
+//{
+//	unsigned long ulOldTime,ulNewTime,ulDiff=0;
+//	ulOldTime=TimeConver(&stOldTime,CON_TIMEUNIT_SEC);
+//	ulNewTime=TimeConver(&stNewTime,CON_TIMEUNIT_SEC);
+//	if(ulOldTime>ulNewTime)
+//	{//时间向旧改
+//		ulDiff=ulOldTime-ulNewTime;
+//	}else if(ulNewTime>ulOldTime)
+//	{//时间向新改
+//		ulDiff=ulNewTime-ulOldTime;
+//	}
+//	if(ulDiff>CON_GRTASK_DATA_TOTAL_SECONDS)			//超过全部数据的时间跨度则初始化
+//		CTask_Rebuild_Task();					
+//}
+
+
+//任务重建
+void CTask_Rebuild_Task(void)
+{
+//	STMETERPARA   stMeterPara;
+	unsigned char ucMPNo,ucMPType,i;
+//	SetDefaultSumGroupTask();
+	for(i=0;i<CON_METER_NUM;i++)
+	{//配置抄表任务
+		ucMPNo=RunPara_GetMeter_MPNo(i);
+		ucMPType=RunPara_GetMPType(ucMPNo);
+		if(ucMPType==CON_MPTYPE_METER)
+		{
+			if(stTerRunPara.stMeterPara[i].ucProtocol==CON_PROTOCOL_INVALID)
+				DeleteDefaultMeterTask(i);
+			else
+				SetDefaultMeterTask(i);
+		}else
+			DeleteDefaultMeterTask(i);
+		//HdConvertWatchDog();						//喂狗
+	}
+	SetDefaultTerTask();
+	//HdConvertWatchDog();						//喂狗
+//	for(i=0;i<CON_PULSE_NUM;i++)
+//	{
+//		if(RunPara_GetPulse_MPNo(i)!=CON_MPNO_INVALID)
+//			SetDefaultPulseTask(i);
+//		else
+//			DeleteDefaultPulseTask(i);
+//		//HdConvertWatchDog();						//喂狗
+//	}
+    stGRTaskExeInfo.ucTaskValidFlag=CON_TASK_RETDATA_INVALID;	//任务状态信息初始化
+    stGRTaskExeInfo.usValidCnt = 0;
+}
+
+//任务检查
+//unsigned char CTask_Check_Task(void)
+//{
+//	unsigned char ucRet=RET_SUCCESS;
+//	STMETERPARA   stMeterPara;
+//	unsigned char ucMPNo,ucMPType,i;
+//	STDATETIME stTimeCurr=GetCurrentTime();
+//	if(stTimeCurr.ucSecond==30)
+//	{//大致为每1分钟检查一次，
+//		//在整30秒的时候检查，可能在30秒的时候检查了两遍，也可能在当前分钟内没有检查
+////		if(TaskCheckSumGroupIsValid()==RET_ERROR)			//检查总加任务
+////			ucRet=RET_ERROR;
+//		for(i=0;i<CON_METER_NUM;i++)
+//		{
+//			ucMPNo=RunPara_GetMeter_MPNo(i);				
+//			ucMPType=RunPara_GetMPType(ucMPNo);
+//			if(ucMPType==CON_MPTYPE_METER)
+//			{
+//				stMeterPara=RunPara_GetMeterPara(i);
+//				if(stMeterPara.ucProtocol!=CON_PROTOCOL_INVALID)
+//				{
+//					if(TaskCheckMeterIsValid(i)==RET_ERROR)	//检查抄表任务
+//					{
+//						ucRet=RET_ERROR;
+//						break;
+//					}
+//				}
+//			}
+//		}
+//		if(TaskCheckTerIsValid()==RET_ERROR)				//检查终端任务
+//			ucRet=RET_ERROR;
+////		for(i=0;i<CON_PULSE_NUM;i++)
+////		{
+////			if(RunPara_GetPulse_MPNo(i)!=CON_MPNO_INVALID)
+////			{
+////				if(TaskCheckPulseIsValid(i)==RET_ERROR)		//检查脉冲任务
+////				{
+////					ucRet=RET_ERROR;
+////					break;
+////				}
+////			}
+////		}
+//	}
+//	return ucRet;
+//}
+//azh 填写定时刷新任务的数据标识
+void Timer_FillRS485MeterDi(void)
+{
+	unsigned char i,ucDIPtr=0;
+
+	//正向有功电量
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDIRPOW_BLOCK;
+	//反向有功电量	
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPUNDIRPOW_BLOCK;
+	//正向无功电量
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDIRVAR_BLOCK;
+	//反向无功电量
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPUNDIRVAR_BLOCK;
+	//一象限无功	
+	//二象限无功	
+	//三象限无功
+	//四象限无功
+	for( i = 0 ; i < 4 ; i ++ )
+	{
+		stSendDIList.usDILabel[ucDIPtr++] = (unsigned short)(CON_DI_TYPE_MPVAR1_BLOCK + 0x10 * i);
+	}
+
+	//正向有功最大需量
+    stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDIRPOWMAXDEMAND_BLOCK;
+	//正向有功最大需量发生时间	
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDIRPOWMAXDEMANDTIME_BLOCK;
+	//反向有功最大需量
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPUNDIRPOWMAXDEMAND_BLOCK;
+	//反向有功最大需量发生时间
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPUNDIRPOWMAXDEMANDTIME_BLOCK;
+
+	//正向无功最大需量
+    stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDIRVARMAXDEMAND_BLOCK;
+	//正向无功最大需量发生时间	
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDIRVARMAXDEMANDTIME_BLOCK;
+	//反向无功最大需量
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPUNDIRVARMAXDEMAND_BLOCK;
+	//反向无功最大需量发生时间
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPUNDIRVARMAXDEMANDTIME_BLOCK;	
+
+	//正向有功电量(上月)
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDIRPOW_LM_BLOCK;
+	//反向有功电量(上月)
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPUNDIRPOW_LM_BLOCK;
+	//正向无功电量(上月)
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDIRVAR_LM_BLOCK;
+	//反向无功电量(上月)
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPUNDIRVAR_LM_BLOCK;
+	//一象限无功(上月)	
+	//二象限无功(上月)	
+	//三象限无功(上月)
+	//四象限无功(上月)
+	for( i = 0 ; i < 4 ; i ++ )
+	{
+		stSendDIList.usDILabel[ucDIPtr++] = (unsigned short)(CON_DI_TYPE_MPVAR1_LM_BLOCK + 0x10 * i);
+	}
+
+	//正向有功最大需量(上月)
+    stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDIRPOWMAXDEMAND_LM_BLOCK;
+	//正向有功最大需量发生时间(上月)	
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDIRPOWMAXDEMANDTIME_LM_BLOCK;
+	//反向有功最大需量(上月)
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPUNDIRPOWMAXDEMAND_LM_BLOCK;
+	//反向有功最大需量发生时间(上月)
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPUNDIRPOWMAXDEMANDTIME_LM_BLOCK;
+
+	//正向无功最大需量(上月)
+    stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDIRVARMAXDEMAND_LM_BLOCK;
+	//正向无功最大需量发生时间(上月)	
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDIRVARMAXDEMANDTIME_LM_BLOCK;
+	//反向无功最大需量(上月)
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPUNDIRVARMAXDEMAND_LM_BLOCK;
+	//反向无功最大需量发生时间(上月)
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPUNDIRVARMAXDEMANDTIME_LM_BLOCK;	
+
+	//UABC
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPVOL_BLOCK;
+	//IABC	
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPCUR_BLOCK;
+	//瞬时有功
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPINSTANTPOW_BLOCK;
+	//瞬时无功
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPINSTANTVAR_BLOCK;
+	//功率因数
+//	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPPOWERFACTOR_BLOCK;
+
+	//最近一次编程时间
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLATELYPROGTIME;
+	//最近一次最大需量清零时间
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLATELYMAXDEMANDCLEARTIME;
+	//脉冲常数
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPPOWCONST;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPVARCONST;
+
+	//电表运行状态字
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPMETERSTATFLAG;//CON_DI_TYPE_MPCO2F_BLOCK;
+	//抄表日
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPC11F_BLOCK;
+
+    //断相次数
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLOSTVOLANUM;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLOSTVOLBNUM;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLOSTVOLCNUM;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLOSTVOLNUM;
+    //累计断相时间
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLOSTVOLATIME;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLOSTVOLBTIME;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLOSTVOLCTIME;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLOSTVOLTIME;
+    //累计断相时间
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLOSTVOLATIME;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLOSTVOLBTIME;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLOSTVOLCTIME;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLOSTVOLTIME;
+    //最近一次断相结束时刻
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLASTVOLAOFFENDTIME;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLASTVOLBOFFENDTIME;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLASTVOLCOFFENDTIME;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPLASTVOLOFFENDTIME;
+
+	//费率时段
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPFEERATE_BLOCK;
+	
+	//电表时间等
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDATEANDWEEK;
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPTIME;
+
+	//编程次数
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPPROGTIMETIMES;
+	//最近一次编程时间
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPPROGRAMTIME;
+
+	//最大需量清零次数
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDEMODECLRNUM;
+	//最近一次需量清零时间
+	stSendDIList.usDILabel[ucDIPtr++] = CON_DI_TYPE_MPDEMODECLRTIME;
+
+//------    
+    stSendDIList.ucDINum = ucDIPtr;
+    stSendDIList.ucDIPtr = 0;
+    stSendDIList.ucReSendnum = 0;
+}
